@@ -5,6 +5,7 @@ Utility tool for making backups of databases, files and directories directly to 
    
 * [Bash] - script language
 * [gdrive] - shell tool for communication with Google Drive
+* [Google Drive] - backups storage
 
 ### Prerequisites
 
@@ -31,5 +32,6 @@ GPL-3.0
 
    [Bash]: <https://www.gnu.org/software/bash/>
    [gdrive]: <https://github.com/prasmussen/gdrive>
+   [Google Drive]: <https://www.google.com/drive>
 
 
