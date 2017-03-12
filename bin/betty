@@ -1,0 +1,437 @@
+#!/bin/bash
+
+# Script arguments:
+CONFIG_FILE=$1
+
+# Helper functions
+echoInfo()
+{
+	setColor 3
+	printf "$1"
+	printf "\n"
+	resetColor
+	return 0
+}
+
+echoProgress()
+{
+	setColor 6
+	printf "%-70s" "$1..."
+	resetColor
+	return 0
+}
+
+echoError()
+{
+	setColor 6
+	printf "ERROR"
+	if [ ! -z "$1" ]; then
+		resetColor
+		printf " [$1]"
+	fi
+	printf "\n"
+	resetColor
+	return 0
+}
+
+echoOK()
+{
+	setColor 2
+	printf "OK"
+	if [ ! -z "$1" ]; then
+		resetColor
+		printf " [$1]"
+	fi
+	printf "\n"
+	resetColor
+	return 0
+}
+
+setColor()
+{
+	tput setaf $1 2>/dev/null
+}
+
+resetColor()
+{
+	tput sgr0 2>/dev/null
+}
+
+# Check input arguments
+checkArgs()
+{
+	echoProgress "Checking configuration"
+	
+	if [ ! -f "$CONFIG_FILE" ]
+	then
+		echoError "Configuration file does not exist"
+		return 1
+	fi
+	
+	echoOK ""
+}
+
+initialCheck()
+{
+	echoProgress "Checking external dependencies"
+	
+	# Check if gdrive is available:
+	if ! type "gdrive" &> /dev/null; then
+		echoError "Please install gdrive"
+		return 1
+	fi
+	
+	# Check if gdrive is configured:
+	cat ~/.gdrive/token_v2.json > /dev/null 2> /dev/null
+	if [ $? != 0 ]; then
+	   echoError "Please configure gdrive"
+	   return 1
+	fi
+	
+	echoOK ""
+	echoProgress "Checking configuration"
+	
+	if [ -z	"$gdrive_directory_root" ]; then 
+		echoError "Please set gdrive_directory_root variable"
+		return 1
+	fi
+	
+	echoOK ""
+	return 0
+}
+
+mysqlDbBackup()
+{
+	BACKUP_NAME=$1
+	BACKUP_DB_HOST=$2
+	BACKUP_DB_USER=$3
+	BACKUP_DB_PASSWORD=$4
+	BACKUP_DB_DATABASE=$5
+	
+	# MySQL dump:
+	echoInfo "MySQL database backup: \"$BACKUP_NAME\""
+	echoProgress "Creating database backup of \"$BACKUP_NAME\""
+	NOW=`date +"$date_prefix"`
+	DUMP_NAME="$BACKUP_NAME$NOW.sql"
+	
+	TMP_LOG=`mktemp`
+	mysqldump -h $BACKUP_DB_HOST -u $BACKUP_DB_USER --password="$BACKUP_DB_PASSWORD" $BACKUP_DB_DATABASE > "$DUMP_NAME" 2>$TMP_LOG
+	if [ $? != 0 ]; then
+	   echoError "Cannot create database SQL dump file"
+	   echoInfo "Command output:"
+	   cat "$TMP_LOG"
+	   return 1
+	fi
+	echoOK ""
+	
+	# Compression:
+	gzip "$DUMP_NAME"
+	FILE_GZIPPED="$DUMP_NAME.gz"
+	
+	# Upload to Google Drive:
+	echoProgress "Uploading $FILE_GZIPPED file to Google Drive"
+	uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_GZIPPED"
+	if [ $? != 0 ]; then
+	   echoError "Upload error"
+	   return 1
+	fi
+	echoOK ""
+}
+
+pgDbBackup()
+{
+	BACKUP_NAME=$1
+	BACKUP_DB_HOST=$2
+	BACKUP_DB_USER=$3
+	BACKUP_DB_PASSWORD=$4
+	BACKUP_DB_DATABASE=$5
+	
+	# MySQL dump:
+	echoInfo "PostgreSQL database backup: \"$BACKUP_NAME\""
+	echoProgress "Creating database backup of \"$BACKUP_NAME\""
+	NOW=`date +"$date_prefix"`
+	DUMP_NAME="$BACKUP_NAME$NOW.sql"
+	
+	TMP_LOG=`mktemp`
+	export PGPASSWORD="$BACKUP_DB_PASSWORD"
+	pg_dump -h $BACKUP_DB_HOST -U $BACKUP_DB_USER $BACKUP_DB_DATABASE > "$DUMP_NAME" 2>$TMP_LOG
+	if [ $? != 0 ]; then
+	   echoError "Cannot create database SQL dump file"
+	   echoInfo "Command output:"
+	   cat "$TMP_LOG"
+	   return 1
+	fi
+	echoOK ""
+	
+	# Compression:
+	gzip "$DUMP_NAME"
+	FILE_GZIPPED="$DUMP_NAME.gz"
+	
+	# Upload to Google Drive:
+	echoProgress "Uploading $FILE_GZIPPED file to Google Drive"
+	uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_GZIPPED"
+	if [ $? != 0 ]; then
+	   echoError "Upload error"
+	   return 1
+	fi
+	echoOK ""
+}
+
+fileBackup()
+{
+	BACKUP_NAME=$1
+	FILE_PATH=$2
+
+	echoInfo "File backup: \"$BACKUP_NAME\""
+	echoProgress "Checking the file"
+	if [ ! -f "$FILE_PATH" ]
+	then
+		echoError "File $FILE_PATH does not exist"
+		return 1
+	fi
+	echoOK ""
+	
+	# Compression:
+	echoProgress "Packing the file"
+	FILE_NAME=$(basename "$FILE_PATH")
+	NOW=`date +"$date_prefix"`
+	FILE_GZIPPED="$FILE_NAME$NOW.gz"
+	gzip < "$FILE_PATH" > "$FILE_GZIPPED"
+	echoOK ""
+	
+	# Upload to Google Drive:
+	echoProgress "Uploading $FILE_GZIPPED file to Google Drive"
+	uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_GZIPPED"
+	if [ $? != 0 ]; then
+	   echoError "Upload error"
+	   return 1
+	fi
+	echoOK ""
+}
+
+directoryBackup() {
+	BACKUP_NAME=$1
+	DIR_PATH=$2
+
+	echoInfo "Directory backup: \"$BACKUP_NAME\""
+	echoProgress "Checking the directory"
+	if [ ! -d "$DIR_PATH" ]
+	then
+		echoError "Directory $DIR_PATH does not exist"
+		return 1
+	fi
+	echoOK ""
+	
+	echoProgress "Packing the directory"
+	CURRENT_DIR=`pwd`
+	NOW=`date +"$date_prefix"`
+	FILE_GZIPPED="$BACKUP_NAME$NOW.tgz"
+	cd "$DIR_PATH"
+	TMP_LOG=`mktemp`
+	tar cfz "$CURRENT_DIR/$FILE_GZIPPED" ./ 2>"$TMP_LOG"
+	if [ $? != 0 ]; then
+	   echoError "Cannot pack the directory"
+	   echoInfo "Command output:"
+	   cat "$TMP_LOG"
+	   cd "$CURRENT_DIR"
+	   return 1
+	fi
+	cd "$CURRENT_DIR"
+	echoOK ""
+	
+	# Upload to Google Drive:
+	echoProgress "Uploading $FILE_GZIPPED file to Google Drive"
+	uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_GZIPPED"
+	if [ $? != 0 ]; then
+	   echoError "Upload error"
+	   return 1
+	fi
+	echoOK ""
+}
+
+directorySync() {
+	local BACKUP_NAME=$1
+	local DIR_PATH=$2
+
+	echoInfo "Directory sync backup: \"$BACKUP_NAME\""
+	echoProgress "Checking the directory"
+	if [ ! -d "$DIR_PATH" ]
+	then
+		echoError "Directory $DIR_PATH does not exist"
+		return 1
+	fi
+	echoOK ""
+	
+	echoProgress "Syncing directory"
+	echoOK "Started"
+	local TMP_LOG=`mktemp`
+	local SYNC_OUTPUT=`gdrive sync upload "$DIR_PATH" "$gdrive_directory_root" 2>$TMP_LOG`
+	if [ $? != 0 ]; then
+		echoError "Sync failed"
+		echoInfo "Command output:"
+		if [ ! -z "$SYNC_OUTPUT" ]; then
+			echo "$SYNC_OUTPUT"
+		fi
+		if [ -f "$TMP_LOG" ]; then
+			cat "$TMP_LOG"
+		fi
+		return 1
+	else
+		if [ ! -z "$SYNC_OUTPUT" ]; then
+			echo "$SYNC_OUTPUT"
+		fi
+	fi
+	echoProgress "Syncing directory"
+	echoOK "Done"
+}
+
+uploadFileToGoogleDrive()
+{
+	ROOT_DIRECTORY=$1
+	DIRECTORY=$2
+	FILE=$3
+
+	# Directory preparation:
+	LIST_OUTPUT=`gdrive list --no-header --query "trashed = false and '$ROOT_DIRECTORY' in parents" | grep " $DIRECTORY "`
+	if [ -z	"$LIST_OUTPUT" ]; then
+		TMP_LOG=`mktemp`
+		CREATE_OUTPUT=`gdrive mkdir --parent "$ROOT_DIRECTORY" "$DIRECTORY" 2>$TMP_LOG`
+		if [ $? != 0 ]; then
+		   echoError "Cannot create Google Drive directory"
+		   echoInfo "Command output:"
+		   echo "$CREATE_OUTPUT"
+		   cat "$TMP_LOG"
+		   return 1
+		fi
+		
+		DIRECTORY_ID=`echo "$CREATE_OUTPUT" | cut -d " " -f 2`
+	else
+		DIRECTORY_ID=`echo "$LIST_OUTPUT" | cut -d " " -f 1`
+	fi
+	
+	# Delete previous file:
+	LIST_OUTPUT=`gdrive list --no-header --query "trashed = false and '$DIRECTORY_ID' in parents" | grep " $FILE " | cut -d " " -f 1`
+	if [ ! -z "$LIST_OUTPUT" ]; then 
+		TMP_LOG=`mktemp`
+		DELETE_OUTPUT=`gdrive delete "$LIST_OUTPUT" 2>$TMP_LOG`
+		if [ $? != 0 ]; then
+		   echoError "Cannot delete previous file"
+		   echoInfo "Command output:"
+		   echo "$DELETE_OUTPUT"
+		   cat "$TMP_LOG"
+		   return 1
+		fi
+	fi
+	
+	# Upload file:
+	TMP_LOG=`mktemp`
+	UPLOAD_OUTPUT=`gdrive upload --parent "$DIRECTORY_ID" "$FILE" 2>$TMP_LOG`
+	if [ $? != 0 ]; then
+	   echoError "Cannot upload the file"
+	   echoInfo "Command output:"
+	   echo "$UPLOAD_OUTPUT"
+	   cat "$TMP_LOG"
+	   return 1
+	fi
+}
+
+databasesBackup()
+{
+	END=100
+	
+	for i in $(seq 1 $END); do
+		NAME="db$i"
+		if [ -n "${!NAME}" ]; then
+			DB_HOST_VAR="db${i}_host"
+			DB_NAME_VAR="db${i}_name"
+			DB_USER_VAR="db${i}_user"
+			DB_PASSWORD_VAR="db${i}_password"
+			DB_TYPE_VAR="db${i}_type"
+			
+			DB_HOST="${!DB_HOST_VAR}"
+			DB_NAME="${!DB_NAME_VAR}"
+			DB_USER="${!DB_USER_VAR}"
+			DB_PASSWORD="${!DB_PASSWORD_VAR}"
+			DB_TYPE="${!DB_TYPE_VAR}"
+			
+			if [ "$DB_TYPE" == "postgresql" ]; then
+				pgDbBackup "${!NAME}" "$DB_HOST" "$DB_USER" "$DB_PASSWORD" "$DB_NAME"
+			else
+				mysqlDbBackup "${!NAME}" "$DB_HOST" "$DB_USER" "$DB_PASSWORD" "$DB_NAME"
+			fi
+		fi
+	done
+}
+
+filesBackup()
+{
+	END=100
+	
+	for i in $(seq 1 $END); do
+		NAME="file$i"
+		if [ -n "${!NAME}" ]; then
+			FILE_PATH="file${i}_path"
+			
+			fileBackup "${!NAME}" "${!FILE_PATH}"
+		fi
+	done
+}
+
+directoriesBackup()
+{
+	END=100
+	
+	for i in $(seq 1 $END); do
+		NAME="dir$i"
+		if [ -n "${!NAME}" ]; then
+			DIR_MODE="dir${i}_mode"
+			DIR_PATH="dir${i}_path"
+			
+			if [ "${!DIR_MODE}" == "sync" ]; then
+				directorySync "${!NAME}" "${!DIR_PATH}"
+			else
+				directoryBackup "${!NAME}" "${!DIR_PATH}"
+			fi
+		fi
+	done
+}
+
+NOW=`date +"%Y-%m-%d %H:%M:%S"`
+echoInfo "Betty Backup Tool in action $NOW"
+
+# Check input arguments
+checkArgs
+if [ $? != 0 ]; then
+	echoInfo "Usage: $0 [configuration-file]"
+	exit 1
+fi
+
+# Load configuration:
+echoProgress "Loading configuration"
+source "$CONFIG_FILE"
+echoOK ""
+
+# Check requirements:
+initialCheck
+if [ $? != 0 ]; then
+	exit 1
+fi
+
+# Create temporary directory:
+CURRENT_DIR=`pwd`
+TMP_DIR="$CURRENT_DIR/tmp"
+mkdir -p $TMP_DIR
+rm -f $TMP_DIR/*
+cd $TMP_DIR
+
+# Backup of databases:
+databasesBackup
+filesBackup
+directoriesBackup
+
+# Delete temporary directory:
+cd $CURRENT_DIR
+rm -f $TMP_DIR/*
+rmdir $TMP_DIR
+
+echoInfo "Done"
