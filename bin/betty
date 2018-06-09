@@ -1,7 +1,32 @@
 #!/bin/bash
 
+# Example config (must be a bash script):
+# gdrive_directory_root="0B-RTEXgIYgbppYWxBU2U34m1XSDg"
+# date_prefix="-%d"
+# pause_between="1s"
+#
+# db1="example-db"
+# db1_host="localhost"
+# db1_name="name"
+# db1_user="user"
+# db1_password="password"
+#
+# file1="example-file"
+# file1_path="/path/to/file"
+#
+# dir1="example-directory"
+# dir1_path="/path/to/directory"
+
+#############
+# Warning:
+# Google Drive has rate limit set on 100 requests for 10 seconds (10 requests per 1 second)
+# Without setting pause_between parameter "Error 403: Rate Limit Exceeded" error might break backup process.
+#############
+
 # Script arguments:
 CONFIG_FILE=$1
+GDRIVE_CONFIG="/root/.gdrive"
+GPG_ENCRYPT_PASSPHRASE=""
 
 # Helper functions
 echoInfo()
@@ -82,7 +107,7 @@ initialCheck()
 	fi
 	
 	# Check if gdrive is configured:
-	cat ~/.gdrive/token_v2.json > /dev/null 2> /dev/null
+	cat "$GDRIVE_CONFIG/token_v2.json" > /dev/null 2> /dev/null
 	if [ $? != 0 ]; then
 	   echoError "Please configure gdrive"
 	   return 1
@@ -107,6 +132,7 @@ mysqlDbBackup()
 	BACKUP_DB_USER=$3
 	BACKUP_DB_PASSWORD=$4
 	BACKUP_DB_DATABASE=$5
+	BACKUP_DB_LOCAL_TARGET_PATH=$6
 	
 	# MySQL dump:
 	echoInfo "MySQL database backup: \"$BACKUP_NAME\""
@@ -127,15 +153,34 @@ mysqlDbBackup()
 	# Compression:
 	gzip "$DUMP_NAME"
 	FILE_GZIPPED="$DUMP_NAME.gz"
+	FILE_OUTPUT="$FILE_GZIPPED"
 	
-	# Upload to Google Drive:
-	echoProgress "Uploading $FILE_GZIPPED file to Google Drive"
-	uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_GZIPPED"
-	if [ $? != 0 ]; then
-	   echoError "Upload error"
-	   return 1
+	# Encrypt the file:
+	if [ ! -z "$GPG_ENCRYPT_PASSPHRASE" ]; then
+		gpg --no-use-agent --batch --passphrase "$GPG_ENCRYPT_PASSPHRASE" --symmetric --cipher-algo aes256 -o "$FILE_OUTPUT.gpg" < "$FILE_OUTPUT"
+		FILE_OUTPUT="$FILE_OUTPUT.gpg"
 	fi
-	echoOK ""
+	
+	if [ -z "$BACKUP_DB_LOCAL_TARGET_PATH" ]; then
+		# Upload to Google Drive:
+		echoProgress "Uploading $FILE_OUTPUT file to Google Drive"
+		uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_OUTPUT"
+		if [ $? != 0 ]; then
+		   echoError "Upload error"
+		   return 1
+		fi
+		echoOK ""
+	else
+		echoProgress "Writing backup file to $BACKUP_DB_LOCAL_TARGET_PATH"
+		mkdir -p "$BACKUP_DB_LOCAL_TARGET_PATH"
+		
+		# Delete backup files older than 60 days:
+		find "$BACKUP_DB_LOCAL_TARGET_PATH" -mtime +60 -type f -exec rm {} \;
+		
+		cp "$FILE_OUTPUT" "$BACKUP_DB_LOCAL_TARGET_PATH"
+		chmod 600 "$BACKUP_DB_LOCAL_TARGET_PATH/$FILE_OUTPUT"
+		echoOK ""
+	fi
 }
 
 pgDbBackup()
@@ -145,6 +190,7 @@ pgDbBackup()
 	BACKUP_DB_USER=$3
 	BACKUP_DB_PASSWORD=$4
 	BACKUP_DB_DATABASE=$5
+	BACKUP_DB_LOCAL_TARGET_PATH=$6
 	
 	# MySQL dump:
 	echoInfo "PostgreSQL database backup: \"$BACKUP_NAME\""
@@ -166,21 +212,41 @@ pgDbBackup()
 	# Compression:
 	gzip "$DUMP_NAME"
 	FILE_GZIPPED="$DUMP_NAME.gz"
+	FILE_OUTPUT="$FILE_GZIPPED"
 	
-	# Upload to Google Drive:
-	echoProgress "Uploading $FILE_GZIPPED file to Google Drive"
-	uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_GZIPPED"
-	if [ $? != 0 ]; then
-	   echoError "Upload error"
-	   return 1
+	# Encrypt the file:
+	if [ ! -z "$GPG_ENCRYPT_PASSPHRASE" ]; then
+		gpg --no-use-agent --batch --passphrase "$GPG_ENCRYPT_PASSPHRASE" --symmetric --cipher-algo aes256 -o "$FILE_OUTPUT.gpg" < "$FILE_OUTPUT"
+		FILE_OUTPUT="$FILE_OUTPUT.gpg"
 	fi
-	echoOK ""
+	
+	if [ -z "$BACKUP_DB_LOCAL_TARGET_PATH" ]; then
+		# Upload to Google Drive:
+		echoProgress "Uploading $FILE_GZIPPED file to Google Drive"
+		uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_OUTPUT"
+		if [ $? != 0 ]; then
+		   echoError "Upload error"
+		   return 1
+		fi
+		echoOK ""
+	else
+		echoProgress "Writing backup file to $BACKUP_DB_LOCAL_TARGET_PATH"
+		mkdir -p "$BACKUP_DB_LOCAL_TARGET_PATH"
+		
+		# Delete backup files older than 60 days:
+		find "$BACKUP_DB_LOCAL_TARGET_PATH" -mtime +60 -type f -exec rm {} \;
+		
+		cp "$FILE_OUTPUT" "$BACKUP_DB_LOCAL_TARGET_PATH"
+		chmod 600 "$BACKUP_DB_LOCAL_TARGET_PATH/$FILE_OUTPUT"
+		echoOK ""
+	fi
 }
 
 fileBackup()
 {
 	BACKUP_NAME=$1
 	FILE_PATH=$2
+	BACKUP_FILE_LOCAL_TARGET_PATH=$3
 
 	echoInfo "File backup: \"$BACKUP_NAME\""
 	echoProgress "Checking the file"
@@ -199,19 +265,40 @@ fileBackup()
 	gzip < "$FILE_PATH" > "$FILE_GZIPPED"
 	echoOK ""
 	
-	# Upload to Google Drive:
-	echoProgress "Uploading $FILE_GZIPPED file to Google Drive"
-	uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_GZIPPED"
-	if [ $? != 0 ]; then
-	   echoError "Upload error"
-	   return 1
+	FILE_OUTPUT="$FILE_GZIPPED"
+	
+	# Encrypt the file:
+	if [ ! -z "$GPG_ENCRYPT_PASSPHRASE" ]; then
+		gpg --no-use-agent --batch --passphrase "$GPG_ENCRYPT_PASSPHRASE" --symmetric --cipher-algo aes256 -o "$FILE_OUTPUT.gpg" < "$FILE_OUTPUT"
+		FILE_OUTPUT="$FILE_OUTPUT.gpg"
 	fi
-	echoOK ""
+	
+	if [ -z "$BACKUP_FILE_LOCAL_TARGET_PATH" ]; then
+		# Upload to Google Drive:
+		echoProgress "Uploading $FILE_OUTPUT file to Google Drive"
+		uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_OUTPUT"
+		if [ $? != 0 ]; then
+		   echoError "Upload error"
+		   return 1
+		fi
+		echoOK ""
+	else
+		echoProgress "Writing backup file to $BACKUP_FILE_LOCAL_TARGET_PATH"
+		mkdir -p "$BACKUP_FILE_LOCAL_TARGET_PATH"
+		
+		# Delete backup files older than 60 days:
+		find "$BACKUP_FILE_LOCAL_TARGET_PATH" -mtime +60 -type f -exec rm {} \;
+		
+		cp "$FILE_OUTPUT" "$BACKUP_FILE_LOCAL_TARGET_PATH"
+		chmod 600 "$BACKUP_FILE_LOCAL_TARGET_PATH/$FILE_OUTPUT"
+		echoOK ""
+	fi
 }
 
 directoryBackup() {
 	BACKUP_NAME=$1
 	DIR_PATH=$2
+	BACKUP_DIR_LOCAL_TARGET_PATH=$3
 
 	echoInfo "Directory backup: \"$BACKUP_NAME\""
 	echoProgress "Checking the directory"
@@ -239,14 +326,34 @@ directoryBackup() {
 	cd "$CURRENT_DIR"
 	echoOK ""
 	
-	# Upload to Google Drive:
-	echoProgress "Uploading $FILE_GZIPPED file to Google Drive"
-	uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_GZIPPED"
-	if [ $? != 0 ]; then
-	   echoError "Upload error"
-	   return 1
+	FILE_OUTPUT="$FILE_GZIPPED"
+	
+	# Encrypt the file:
+	if [ ! -z "$GPG_ENCRYPT_PASSPHRASE" ]; then
+		gpg --no-use-agent --batch --passphrase "$GPG_ENCRYPT_PASSPHRASE" --symmetric --cipher-algo aes256 -o "$FILE_OUTPUT.gpg" < "$FILE_OUTPUT"
+		FILE_OUTPUT="$FILE_OUTPUT.gpg"
 	fi
-	echoOK ""
+	
+	if [ -z "$BACKUP_DIR_LOCAL_TARGET_PATH" ]; then
+		# Upload to Google Drive:
+		echoProgress "Uploading $FILE_OUTPUT file to Google Drive"
+		uploadFileToGoogleDrive "$gdrive_directory_root" "$BACKUP_NAME" "$FILE_OUTPUT"
+		if [ $? != 0 ]; then
+		   echoError "Upload error"
+		   return 1
+		fi
+		echoOK ""
+	else
+		echoProgress "Writing backup file to $BACKUP_DIR_LOCAL_TARGET_PATH"
+		mkdir -p "$BACKUP_DIR_LOCAL_TARGET_PATH"
+		
+		# Delete backup files older than 60 days:
+		find "$BACKUP_DIR_LOCAL_TARGET_PATH" -mtime +60 -type f -exec rm {} \;
+		
+		cp "$FILE_OUTPUT" "$BACKUP_DIR_LOCAL_TARGET_PATH"
+		chmod 600 "$BACKUP_DIR_LOCAL_TARGET_PATH/$FILE_OUTPUT"
+		echoOK ""
+	fi
 }
 
 directorySync() {
@@ -265,7 +372,7 @@ directorySync() {
 	echoProgress "Syncing directory"
 	echoOK "Started"
 	local TMP_LOG=`mktemp`
-	local SYNC_OUTPUT=`gdrive sync upload "$DIR_PATH" "$gdrive_directory_root" 2>$TMP_LOG`
+	local SYNC_OUTPUT=`gdrive --config "$GDRIVE_CONFIG" sync upload "$DIR_PATH" "$gdrive_directory_root" 2>$TMP_LOG`
 	if [ $? != 0 ]; then
 		echoError "Sync failed"
 		echoInfo "Command output:"
@@ -292,10 +399,12 @@ uploadFileToGoogleDrive()
 	FILE=$3
 
 	# Directory preparation:
-	LIST_OUTPUT=`gdrive list --no-header --query "trashed = false and '$ROOT_DIRECTORY' in parents" | grep " $DIRECTORY "`
-	if [ -z	"$LIST_OUTPUT" ]; then
+	TMP_LOG=`mktemp`
+	LIST_OUTPUT=`gdrive --config "$GDRIVE_CONFIG" list --no-header --query "trashed = false and '$ROOT_DIRECTORY' in parents" 2>$TMP_LOG`
+	LIST_OUTPUT_GREP=`echo "$LIST_OUTPUT" | grep " $DIRECTORY "`
+	if [ -z	"$LIST_OUTPUT_GREP" ]; then
 		TMP_LOG=`mktemp`
-		CREATE_OUTPUT=`gdrive mkdir --parent "$ROOT_DIRECTORY" "$DIRECTORY" 2>$TMP_LOG`
+		CREATE_OUTPUT=`gdrive --config "$GDRIVE_CONFIG" mkdir --parent "$ROOT_DIRECTORY" "$DIRECTORY" 2>$TMP_LOG`
 		if [ $? != 0 ]; then
 		   echoError "Cannot create Google Drive directory"
 		   echoInfo "Command output:"
@@ -304,16 +413,16 @@ uploadFileToGoogleDrive()
 		   return 1
 		fi
 		
-		DIRECTORY_ID=`echo "$CREATE_OUTPUT" | cut -d " " -f 2`
+		DIRECTORY_ID=`echo "$CREATE_OUTPUT" | cut -d " " -f 2 | head -n 1`
 	else
-		DIRECTORY_ID=`echo "$LIST_OUTPUT" | cut -d " " -f 1`
+		DIRECTORY_ID=`echo "$LIST_OUTPUT_GREP" | cut -d " " -f 1 | head -n 1`
 	fi
 	
 	# Delete previous file:
-	LIST_OUTPUT=`gdrive list --no-header --query "trashed = false and '$DIRECTORY_ID' in parents" | grep " $FILE " | cut -d " " -f 1`
-	if [ ! -z "$LIST_OUTPUT" ]; then 
+	LIST_OUTPUT=`gdrive --config "$GDRIVE_CONFIG" list --no-header --query "trashed = false and '$DIRECTORY_ID' in parents" | grep " $FILE " | cut -d " " -f 1 | head -n 1`
+	if [ ! -z "$LIST_OUTPUT" ]; then
 		TMP_LOG=`mktemp`
-		DELETE_OUTPUT=`gdrive delete "$LIST_OUTPUT" 2>$TMP_LOG`
+		DELETE_OUTPUT=`gdrive --config "$GDRIVE_CONFIG" delete "$LIST_OUTPUT" 2>$TMP_LOG`
 		if [ $? != 0 ]; then
 		   echoError "Cannot delete previous file"
 		   echoInfo "Command output:"
@@ -325,13 +434,22 @@ uploadFileToGoogleDrive()
 	
 	# Upload file:
 	TMP_LOG=`mktemp`
-	UPLOAD_OUTPUT=`gdrive upload --parent "$DIRECTORY_ID" "$FILE" 2>$TMP_LOG`
+	UPLOAD_OUTPUT=`gdrive --config "$GDRIVE_CONFIG" upload --parent "$DIRECTORY_ID" "$FILE" 2>$TMP_LOG`
 	if [ $? != 0 ]; then
 	   echoError "Cannot upload the file"
 	   echoInfo "Command output:"
 	   echo "$UPLOAD_OUTPUT"
 	   cat "$TMP_LOG"
 	   return 1
+	fi
+}
+
+doPause()
+{
+	if [ ! -z "$pause_between" ]; then
+		echoProgress "Pausing $pause_between"
+		sleep "$pause_between"
+		echoOK
 	fi
 }
 
@@ -347,18 +465,22 @@ databasesBackup()
 			DB_USER_VAR="db${i}_user"
 			DB_PASSWORD_VAR="db${i}_password"
 			DB_TYPE_VAR="db${i}_type"
+			DB_LOCAL_TARGET_PATH_VAR="db${i}_local_target_path"
 			
 			DB_HOST="${!DB_HOST_VAR}"
 			DB_NAME="${!DB_NAME_VAR}"
 			DB_USER="${!DB_USER_VAR}"
 			DB_PASSWORD="${!DB_PASSWORD_VAR}"
 			DB_TYPE="${!DB_TYPE_VAR}"
+			DB_LOCAL_TARGET_PATH="${!DB_LOCAL_TARGET_PATH_VAR}"
 			
 			if [ "$DB_TYPE" == "postgresql" ]; then
-				pgDbBackup "${!NAME}" "$DB_HOST" "$DB_USER" "$DB_PASSWORD" "$DB_NAME"
+				pgDbBackup "${!NAME}" "$DB_HOST" "$DB_USER" "$DB_PASSWORD" "$DB_NAME" "$DB_LOCAL_TARGET_PATH"
 			else
-				mysqlDbBackup "${!NAME}" "$DB_HOST" "$DB_USER" "$DB_PASSWORD" "$DB_NAME"
+				mysqlDbBackup "${!NAME}" "$DB_HOST" "$DB_USER" "$DB_PASSWORD" "$DB_NAME" "$DB_LOCAL_TARGET_PATH"
 			fi
+			
+			doPause
 		fi
 	done
 }
@@ -371,8 +493,11 @@ filesBackup()
 		NAME="file$i"
 		if [ -n "${!NAME}" ]; then
 			FILE_PATH="file${i}_path"
+			FILE_LOCAL_TARGET_PATH_VAR="file${i}_local_target_path"
 			
-			fileBackup "${!NAME}" "${!FILE_PATH}"
+			fileBackup "${!NAME}" "${!FILE_PATH}" "${!FILE_LOCAL_TARGET_PATH_VAR}"
+			
+			doPause
 		fi
 	done
 }
@@ -386,12 +511,15 @@ directoriesBackup()
 		if [ -n "${!NAME}" ]; then
 			DIR_MODE="dir${i}_mode"
 			DIR_PATH="dir${i}_path"
+			DIR_LOCAL_TARGET_PATH_VAR="dir${i}_local_target_path"
 			
 			if [ "${!DIR_MODE}" == "sync" ]; then
 				directorySync "${!NAME}" "${!DIR_PATH}"
 			else
-				directoryBackup "${!NAME}" "${!DIR_PATH}"
+				directoryBackup "${!NAME}" "${!DIR_PATH}" "${!DIR_LOCAL_TARGET_PATH_VAR}"
 			fi
+			
+			doPause
 		fi
 	done
 }
@@ -417,8 +545,19 @@ if [ $? != 0 ]; then
 	exit 1
 fi
 
-# Create temporary directory:
+# Override configuration directory:
+if [ -n "$gdrive_config" ]; then
+	GDRIVE_CONFIG="$gdrive_config"
+fi
+
+# Override GPG encryption passphrase:
+if [ -n "$gpg_encrypt_passphrase" ]; then
+	GPG_ENCRYPT_PASSPHRASE="$gpg_encrypt_passphrase"
+fi
+
 CURRENT_DIR=`pwd`
+
+# Create temporary directory:
 TMP_DIR="$CURRENT_DIR/tmp"
 mkdir -p $TMP_DIR
 rm -f $TMP_DIR/*
@@ -432,6 +571,6 @@ directoriesBackup
 # Delete temporary directory:
 cd $CURRENT_DIR
 rm -f $TMP_DIR/*
-rmdir $TMP_DIR
+rmdir $TMP_DIR 2> /dev/null
 
 echoInfo "Done"
